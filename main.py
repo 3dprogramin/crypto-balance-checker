@@ -1,11 +1,18 @@
-import os, json
+import os
 from time import sleep
 from twilio.rest import Client
 from dotenv import load_dotenv
-import logging as log
-import requests as req
+from modules.crypto import Crypto
+from modules.log import Log
 load_dotenv()
-log.getLogger().setLevel(log.INFO)
+
+
+# get cryptocurrency from environment variables
+CRYPTOCURRENCY = os.environ['CRYPTOCURRENCY'].upper()
+# setup logging with cryptocurrency
+log = Log(CRYPTOCURRENCY)
+# set recheck delay
+RECHECK_DELAY = int(os.environ['RECHECK_DELAY'])
 
 
 # Send SMS message
@@ -13,7 +20,7 @@ def send_sms(message):
     account_sid = os.environ['TWILIO_ACCOUNT_SID']
     auth_token = os.environ['TWILIO_AUTH_TOKEN']
     phone_number = os.environ['TWILIO_PHONE_NUMBER']
-    to = os.environ['SMS_RECEIVER']
+    to = os.environ['TWILIO_SMS_RECEIVER']
 
     client = Client(account_sid, auth_token)
     message = client.messages \
@@ -26,39 +33,29 @@ def send_sms(message):
     log.info(f'Message sent: {message.sid}')
 
 
-# get balance of eth address from etherscan
-def get_balance(address, api_key):
-    url = f'https://api.etherscan.io/api?module=account&action=balance&address={address}&tag=latest&apikey={api_key}'
-    r = req.get(url)
-    js = json.loads(r.text)
-    balance = float(str(int(js['result']) / 10).split('e')[0])
-    return round(balance, 2)
-
-
-def run():
-    eth_address = os.environ['ETH_ADDRESS']
-    api_key = os.environ['ETHERSCAN_API_KEY']
-
+# main checking method
+def run(address, get_balance_method):
     # print ETH address and current balance
-    log.info(f'ETH address: {eth_address}')
-    balance = get_balance(eth_address, api_key)
-    latest_balance = balance
-    log.info(f'Current balance: {balance} ETH')
+    log.info(f'Address: {address}')
+
+    initial_balance = get_balance_method(address)
+    log.info(f'Current balance: {format(initial_balance, "f")} {CRYPTOCURRENCY}')
 
     k = 0
     # run until balance changes
     while True:
-        latest_balance = get_balance(eth_address, api_key)
+        latest_balance = get_balance_method(address)
         # check if balance changed
-        if balance != latest_balance:
+        if initial_balance != latest_balance:
             # it did, send SMS and show to UI
-            pretty_eth_address = eth_address[0:6] + '...' + eth_address[-4:len(eth_address)]
-            msg = f'[ETH bot] Balance changed from {balance} ETH to {latest_balance} ETH for {pretty_eth_address}'
+            pretty_eth_address = address[0:6] + '...' + address[-4:len(address)]
+            msg = f'[{CRYPTOCURRENCY}] Balance changed from {format(initial_balance, "f")} {CRYPTOCURRENCY} ' \
+                  f'to {format(latest_balance, "f")} {CRYPTOCURRENCY} for {pretty_eth_address}'
             log.info(msg)
             send_sms(msg)
             # return, no need to continue
             return
-        sleep(1)
+        sleep(RECHECK_DELAY)
         k += 1
         # print to UI every 20k checks
         if k % 20000 == 0:
@@ -68,18 +65,32 @@ def run():
 def main():
     ctrl_c = False
     success = False
+    unknown_currency = False
     try:
-        log.info('ETH balance checker')
-        run()
+        log.info('Balance checker')
+        log.info(f'Re-checking every {RECHECK_DELAY}s')
+        # validate currency and set method for getting balance
+        if CRYPTOCURRENCY == 'BTC':
+            get_balance_method = Crypto.get_btc_balance
+        elif CRYPTOCURRENCY == 'ETH':
+            get_balance_method = Crypto.get_eth_balance
+        elif CRYPTOCURRENCY == 'EGLD':
+            get_balance_method = Crypto.get_egld_balance
+        else:
+            unknown_currency = True
+            raise Exception(f'unknown cryptocurrency: {CRYPTOCURRENCY}')
+
+        # start the checking with address as param
+        run(os.environ['ADDRESS'], get_balance_method)
         success = True
     except Exception as ex:
-        log.error(ex)
+        log.error(f'Error: {ex}')
     except KeyboardInterrupt:
         log.warning('CTR+C pressed, stopping')
         ctrl_c = True
     finally:
         # if success or CTRL+C pressed, return
-        if success or ctrl_c:
+        if success or ctrl_c or unknown_currency:
             return
 
         # if other error, sleep for 30 and restart
